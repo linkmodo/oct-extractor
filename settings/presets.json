@@ -1,0 +1,14 @@
+{
+    "Macular OCT Crop": {
+        "top": 50,
+        "left": 50,
+        "width": 512,
+        "height": 512
+    },
+    "Optic Nerve OCT Crop": {
+        "top": 100,
+        "left": 100,
+        "width": 400,
+        "height": 400
+    }
+}
