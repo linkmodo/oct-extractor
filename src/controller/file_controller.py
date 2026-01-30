@@ -8,7 +8,10 @@ Controls file import operations for the OCT Image Extraction application.
 """
 
 import os
+import logging
 from typing import Tuple, List, Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 class FileController:
     """Controller class for file operations."""
@@ -34,18 +37,34 @@ class FileController:
         Returns:
             Tuple[bool, str]: (Success, Message)
         """
-        # Validate file path
-        valid, message = self.file_manager.validate_file_path(file_path)
-        if not valid:
-            return False, message
+        if not file_path:
+            logger.error("Empty file path provided")
+            return False, "No file path provided"
         
-        # Check if file is supported
-        if not self.oct_reader.is_supported_file(file_path):
-            return False, f"Unsupported file format: {os.path.basename(file_path)}"
-        
-        # Load file
-        success, message = self.oct_reader.load_file(file_path)
-        return success, message
+        try:
+            # Validate file path
+            valid, message = self.file_manager.validate_file_path(file_path)
+            if not valid:
+                logger.warning(f"File validation failed for {file_path}: {message}")
+                return False, message
+            
+            # Check if file is supported
+            if not self.oct_reader.is_supported_file(file_path):
+                logger.warning(f"Unsupported file format: {file_path}")
+                return False, f"Unsupported file format: {os.path.basename(file_path)}"
+            
+            # Load file
+            success, message = self.oct_reader.load_file(file_path)
+            if success:
+                logger.info(f"Successfully imported file: {file_path}")
+            else:
+                logger.error(f"Failed to import file {file_path}: {message}")
+            return success, message
+            
+        except Exception as e:
+            error_msg = f"Unexpected error importing file: {str(e)}"
+            logger.exception(error_msg)
+            return False, error_msg
     
     def import_files(self, file_paths: List[str]) -> List[Tuple[str, bool, str]]:
         """
@@ -73,7 +92,11 @@ class FileController:
         Returns:
             List[str]: List of imported file names
         """
-        return list(self.oct_reader.loaded_files.keys())
+        try:
+            return list(self.oct_reader.file_paths.keys())
+        except Exception as e:
+            logger.error(f"Error getting imported files: {e}")
+            return []
     
     def get_file_metadata(self, file_name: str) -> Optional[Dict[str, Any]]:
         """
@@ -85,9 +108,18 @@ class FileController:
         Returns:
             Optional[Dict[str, Any]]: File metadata or None if not found
         """
-        if file_name in self.oct_reader.file_metadata:
-            return self.oct_reader.file_metadata[file_name]
-        return None
+        if not file_name:
+            logger.warning("Empty file name provided to get_file_metadata")
+            return None
+            
+        try:
+            if file_name in self.oct_reader.file_metadata:
+                return self.oct_reader.file_metadata[file_name]
+            logger.debug(f"No metadata found for file: {file_name}")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting metadata for {file_name}: {e}")
+            return None
     
     def get_file_preview(self, file_name: str) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -99,4 +131,12 @@ class FileController:
         Returns:
             Tuple[Optional[str], Optional[str]]: (Preview image path, Metadata string)
         """
-        return self.oct_reader.get_preview(file_name)
+        if not file_name:
+            logger.warning("Empty file name provided to get_file_preview")
+            return None, None
+            
+        try:
+            return self.oct_reader.get_preview(file_name)
+        except Exception as e:
+            logger.error(f"Error getting preview for {file_name}: {e}")
+            return None, None

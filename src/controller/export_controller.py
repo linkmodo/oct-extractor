@@ -106,6 +106,10 @@ class ExportController:
         error_messages = []
         total_frames = len(frames)
         
+        # Track files already exported to DICOM to avoid duplicates
+        # For DICOM, we export entire files/volumes, not individual frames
+        dicom_exported_files = set()
+        
         for i, frame in enumerate(frames):
             # Update progress if callback provided
             if progress_callback and callable(progress_callback):
@@ -126,8 +130,15 @@ class ExportController:
                     continue
                 
                 # Get frame image data using the shared OCTFileReader instance
-                logger.info(f"Exporting frame: {frame_id} from {file_name} (type: {frame.get('type', 'unknown')})")                
-                image_data = self.oct_reader.get_frame_image(file_name, frame_id)
+                logger.info(f"Exporting frame: {frame_id} from {file_name} (type: {frame.get('type', 'unknown')})")
+                
+                # Check if segmentation overlay is requested
+                use_segmentation_overlay = export_settings.get('segmentation_overlay', False)
+                if use_segmentation_overlay and frame.get('has_segmentation', False):
+                    image_data = self.oct_reader.get_frame_image_with_segmentation(file_name, frame_id)
+                    logger.debug(f"Using segmentation overlay for {frame_id}")
+                else:
+                    image_data = self.oct_reader.get_frame_image(file_name, frame_id)
                 
                 if image_data is None:
                     error_count += 1
@@ -136,28 +147,48 @@ class ExportController:
                     logger.error(error_message)
                     continue
                     
+                # Determine export format (must be done before checking dtype)
+                export_format = export_settings.get('format', 'PNG')
+                
                 # Log image data shape and type to help with debugging
                 logger.debug(f"Image data for {frame_id}: shape={image_data.shape}, dtype={image_data.dtype}")
                 
                 # Ensure the image data is in the correct format for saving
                 if image_data.dtype != np.uint8 and export_format != 'DICOM':
                     logger.info(f"Converting {frame_id} from {image_data.dtype} to uint8")
+                    # Handle NaN values by replacing with 0 (black)
+                    if np.issubdtype(image_data.dtype, np.floating):
+                        image_data = np.nan_to_num(image_data, nan=0.0, posinf=0.0, neginf=0.0)
+                    
                     # Normalize to 0-255 range for proper display
-                    image_data = ((image_data - image_data.min()) / 
-                                (image_data.max() - image_data.min() + 1e-10) * 255).astype(np.uint8)
+                    # Empty/background areas (value 0) stay black
+                    data_min = image_data.min()
+                    data_max = image_data.max()
+                    if data_max > data_min:
+                        image_data = ((image_data - data_min) / (data_max - data_min) * 255).astype(np.uint8)
+                    else:
+                        # All values are the same, set to black
+                        image_data = np.zeros_like(image_data, dtype=np.uint8)
                 
                 # Process image if image controller is available
                 if self.image_controller:
                     image_data = self.image_controller.process_image(image_data, export_settings)
-                
-                # Determine export format
-                export_format = export_settings.get('format', 'PNG')
                 if export_format == 'DICOM':
                     # For DICOM export, use OCT-Converter's DICOM export
-                    success, msg = self.oct_reader.export_to_dicom(file_name, export_dir)
+                    # DICOM exports entire files, not individual frames
+                    # Skip if this file has already been exported to DICOM
+                    if file_name in dicom_exported_files:
+                        logger.debug(f"Skipping DICOM export for {file_name} - already exported")
+                        continue
+                    
+                    dicom_options = export_settings.get('dicom_options', {})
+                    success, msg, dicom_files = self.oct_reader.export_to_dicom(
+                        file_name, export_dir, dicom_options
+                    )
                     if success:
                         success_count += 1
-                        logger.info(f"Successfully exported {file_name} to DICOM")
+                        dicom_exported_files.add(file_name)
+                        logger.info(f"Successfully exported {file_name} to DICOM: {len(dicom_files)} files")
                     else:
                         error_count += 1
                         error_messages.append(msg)
@@ -219,6 +250,29 @@ class ExportController:
                                         logger.info(f"Saved metadata to {metadata_file}")
                             except Exception as e:
                                 logger.warning(f"Failed to export metadata for {frame_id}: {e}")
+                    
+                    # Export segmentation JSON if requested
+                    if success and export_settings.get('segmentation_json', False):
+                        if frame.get('has_segmentation', False) and frame.get('type') == 'oct':
+                            try:
+                                volume_id = frame.get('volume_id', 0)
+                                slice_id = frame.get('slice_id', 0)
+                                
+                                seg_json_file = os.path.join(
+                                    export_dir,
+                                    f"{os.path.splitext(file_name)[0]}_{frame_id}_segmentation.json"
+                                )
+                                
+                                seg_success, seg_msg = self.oct_reader.export_segmentation_json(
+                                    file_name, volume_id, slice_id, seg_json_file
+                                )
+                                
+                                if seg_success:
+                                    logger.info(f"Exported segmentation JSON for {frame_id}")
+                                else:
+                                    logger.warning(f"Could not export segmentation for {frame_id}: {seg_msg}")
+                            except Exception as e:
+                                logger.warning(f"Failed to export segmentation JSON for {frame_id}: {e}")
             
             except Exception as e:
                 error_count += 1

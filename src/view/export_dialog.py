@@ -10,7 +10,7 @@ Dialog for exporting OCT frames.
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                            QPushButton, QFileDialog, QComboBox, QCheckBox,
                            QGroupBox, QGridLayout, QSpinBox, QLineEdit,
-                           QRadioButton, QButtonGroup)
+                           QRadioButton, QButtonGroup, QFormLayout)
 from PyQt5.QtCore import Qt
 
 class ExportDialog(QDialog):
@@ -73,6 +73,27 @@ class ExportDialog(QDialog):
             "- Create unique name: Append a number to create a new file"
         )
         options_layout.addRow("If file exists:", self.duplicate_combo)
+        
+        # Layer segmentation options (for Heidelberg OCT files)
+        self.segmentation_group = QGroupBox("Layer Segmentation (if available)")
+        seg_layout = QVBoxLayout()
+        
+        self.seg_overlay_checkbox = QCheckBox("Export with segmentation overlay")
+        self.seg_overlay_checkbox.setToolTip(
+            "Export OCT slices with layer segmentation boundaries drawn on the image.\n"
+            "Only available for files that contain segmentation data."
+        )
+        seg_layout.addWidget(self.seg_overlay_checkbox)
+        
+        self.seg_json_checkbox = QCheckBox("Export segmentation as JSON")
+        self.seg_json_checkbox.setToolTip(
+            "Export layer segmentation coordinates as JSON files for analysis.\n"
+            "Creates a separate JSON file for each slice with layer boundary coordinates."
+        )
+        seg_layout.addWidget(self.seg_json_checkbox)
+        
+        self.segmentation_group.setLayout(seg_layout)
+        options_layout.addRow(self.segmentation_group)
         
         # Crop options
         self.crop_checkbox = QCheckBox("Crop images")
@@ -148,7 +169,6 @@ class ExportDialog(QDialog):
         main_layout.addLayout(button_layout)
         
         # Connect signals
-        self.rotation_checkbox.toggled.connect(self.toggle_rotation_combo)
         self.custom_radio.toggled.connect(self.toggle_prefix_edit)
     
     def browse_export_folder(self):
@@ -209,7 +229,9 @@ class ExportDialog(QDialog):
             'crop': self.crop_checkbox.isChecked(),
             'crop_params': crop_params,
             'naming': naming,
-            'on_duplicate': self.duplicate_combo.currentData()
+            'on_duplicate': self.duplicate_combo.currentData(),
+            'segmentation_overlay': self.seg_overlay_checkbox.isChecked(),
+            'segmentation_json': self.seg_json_checkbox.isChecked()
         }
         
         return self.export_settings

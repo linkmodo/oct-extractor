@@ -8,8 +8,11 @@ Controls image processing operations for the OCT Image Extraction application.
 """
 
 import os
+import logging
 from typing import Tuple, Dict, Any, Optional
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 class ImageController:
     """Controller class for image processing operations."""
@@ -37,7 +40,19 @@ class ImageController:
         Returns:
             np.ndarray: Processed image data
         """
-        return self.image_processor.process_image(image_data, processing_params)
+        if image_data is None:
+            logger.error("Received None image data for processing")
+            raise ValueError("Image data cannot be None")
+            
+        if not isinstance(image_data, np.ndarray):
+            logger.error(f"Invalid image data type: {type(image_data)}")
+            raise TypeError(f"Expected numpy array, got {type(image_data)}")
+            
+        try:
+            return self.image_processor.process_image(image_data, processing_params or {})
+        except Exception as e:
+            logger.error(f"Error processing image: {e}")
+            raise
     
     def rotate_image(self, image_data: np.ndarray, angle: int) -> np.ndarray:
         """
@@ -101,10 +116,19 @@ class ImageController:
         Returns:
             Dict[str, np.ndarray]: Dictionary mapping image IDs to processed image data
         """
+        if not images:
+            logger.warning("Empty images dictionary provided for batch processing")
+            return {}
+            
         processed_images = {}
         
         for image_id, image_data in images.items():
-            processed_images[image_id] = self.process_image(image_data, processing_params)
+            try:
+                processed_images[image_id] = self.process_image(image_data, processing_params)
+            except Exception as e:
+                logger.error(f"Error processing image {image_id}: {e}")
+                # Continue processing other images
+                continue
         
         return processed_images
     

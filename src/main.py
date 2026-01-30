@@ -283,6 +283,11 @@ class MainWindow(QMainWindow):
         batch_process_action.triggered.connect(self.batch_process)
         menubar.addAction(batch_process_action)
         
+        # Export to DICOM action (directly in menu bar)
+        dicom_export_action = QAction("Export to DICOM...", self)
+        dicom_export_action.triggered.connect(self.show_dicom_export_dialog)
+        menubar.addAction(dicom_export_action)
+        
         # Settings action (directly in menu bar)
         settings_action = QAction("Settings...", self)
         settings_action.triggered.connect(self.show_settings_dialog)
@@ -307,6 +312,10 @@ class MainWindow(QMainWindow):
         export_action = QAction("Export", self)
         export_action.triggered.connect(self.show_export_dialog)
         toolbar.addAction(export_action)
+        
+        dicom_action = QAction("DICOM", self)
+        dicom_action.triggered.connect(self.show_dicom_export_dialog)
+        toolbar.addAction(dicom_action)
         
         toolbar.addSeparator()
         
@@ -745,6 +754,34 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self)
         dialog.exec_()
     
+    def show_dicom_export_dialog(self):
+        """Show the DICOM export dialog."""
+        from view.dicom_export_dialog import DicomExportDialog
+        
+        # Check if any files are loaded
+        if not self.oct_reader.file_paths:
+            QMessageBox.information(
+                self, 
+                "No Files Loaded",
+                "Please import OCT files first before exporting to DICOM."
+            )
+            return
+        
+        # Check if any files support DICOM export
+        dicom_files = self.oct_reader.get_dicom_supported_files()
+        if not dicom_files:
+            QMessageBox.information(
+                self,
+                "No DICOM-Compatible Files",
+                "None of the loaded files support DICOM export.\n\n"
+                "Supported formats: .e2e, .img, .fds, .fda, .oct"
+            )
+            return
+        
+        # Show the DICOM export dialog
+        dialog = DicomExportDialog(self.oct_reader, self)
+        dialog.exec_()
+    
     def batch_process(self):
         """Batch process multiple files."""
         # Use relative import instead of absolute
@@ -837,7 +874,7 @@ class MainWindow(QMainWindow):
         """Show the about dialog."""
         about_text = """
         <h2>OCT Image Extraction Tool</h2>
-        <p>Version 2.1</p>
+        <p>Version 2.2</p>
         
         <p>An application to extract and process images from various OCT file formats used in ophthalmology.</p>
         
@@ -851,11 +888,28 @@ class MainWindow(QMainWindow):
             <li>DICOM (.dcm)</li>
         </ul>
         
+        <h3>Export Formats:</h3>
+        <ul>
+            <li>PNG, JPEG, TIFF image formats</li>
+            <li>DICOM with proper headers (OPT modality)</li>
+            <li>Layer segmentation overlay (Heidelberg)</li>
+            <li>Segmentation data as JSON</li>
+        </ul>
+        
+        <h3>Key Features:</h3>
+        <ul>
+            <li>Batch processing of multiple files</li>
+            <li>Layer segmentation visualization</li>
+            <li>DICOM export with correct metadata</li>
+            <li>Image processing (rotation, crop, contrast)</li>
+        </ul>
+        
         <h3>Open Source Components:</h3>
         <p>This application uses the OCT-Converter library developed by Mark Graham.</p>
-        <p>OCT-Converter is available at: <a href="https://github.com/marksgraham/OCT-Converter">github.com/marksgraham/OCT-Converter</a></p>
+        <p>OCT-Converter: <a href="https://github.com/marksgraham/OCT-Converter">github.com/marksgraham/OCT-Converter</a></p>
         
         <p>Created by: Li Fan</p>
+        <p>Repository: <a href="https://github.com/linkmodo/oct-extractor">github.com/linkmodo/oct-extractor</a></p>
         """
         
         # Create a message box with rich text formatting

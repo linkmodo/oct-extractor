@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 
 # Import OCT-Converter library
 try:
-    import pkg_resources
+    from importlib.metadata import version as get_version, PackageNotFoundError
+    from packaging.version import Version
     from oct_converter.readers import E2E, IMG, FDS, FDA, BOCT, POCT
     from oct_converter.readers import BOCT as OCT  # Alias BOCT as OCT for backward compatibility
     from oct_converter.readers import POCT as OCTRAW  # Alias POCT as OCTRAW for backward compatibility
@@ -30,11 +31,13 @@ try:
     
     # Check OCT-Converter version
     required_version = "0.4.0"
-    current_version = pkg_resources.get_distribution("oct-converter").version
-    if pkg_resources.parse_version(current_version) < pkg_resources.parse_version(required_version):
-        logger.warning(f"OCT-Converter version {current_version} may be outdated. Version {required_version} or higher is recommended.")
-    
-    logger.info(f"OCT-Converter version {current_version} loaded successfully")
+    try:
+        current_version = get_version("oct-converter")
+        if Version(current_version) < Version(required_version):
+            logger.warning(f"OCT-Converter version {current_version} may be outdated. Version {required_version} or higher is recommended.")
+        logger.info(f"OCT-Converter version {current_version} loaded successfully")
+    except PackageNotFoundError:
+        logger.warning("Could not determine OCT-Converter version")
     
 except ImportError as e:
     error_msg = "OCT-Converter library not found. Please install it using: pip install oct-converter"
@@ -49,6 +52,7 @@ class OCTFileReader:
         self.loaded_files = {}  # Dictionary to store loaded file objects by full path
         self.file_paths = {}    # Dictionary to map file names to full paths
         self.file_metadata = {}  # Dictionary to store file metadata by file name
+        self.segmentation_data = {}  # Dictionary to store layer segmentation data by file name
         self.supported_extensions = [
             '.e2e', '.E2E',  # Heidelberg
             '.img', '.IMG',  # Zeiss
@@ -457,6 +461,18 @@ class OCTFileReader:
                         volume_id = getattr(volume, 'volume_id', f"vol{i}")
                         laterality = getattr(volume, 'laterality', 'Unknown')
                         logger.debug(f"Volume {i} ID: {volume_id}, laterality: {laterality}")
+                        
+                        # Check for layer segmentation data (contours)
+                        has_segmentation = hasattr(volume, 'contours') and volume.contours is not None
+                        if has_segmentation:
+                            # Store segmentation data for this volume
+                            seg_key = f"{file_name}_vol{i}"
+                            self.segmentation_data[seg_key] = {
+                                'contours': volume.contours,
+                                'volume_id': i,
+                                'file_name': file_name
+                            }
+                            logger.info(f"Found layer segmentation data for volume {i} in {file_name}")
                     
                         for j in range(slices_count):
                             frames.append({
@@ -467,7 +483,8 @@ class OCTFileReader:
                                 'volume_id': i,
                                 'slice_id': j,
                                 'volume_obj_id': volume_id,
-                                'laterality': laterality
+                                'laterality': laterality,
+                                'has_segmentation': has_segmentation
                             })
                     logger.debug(f"Extracted OCT slices from E2E file {file_name}")
                 except Exception as e:
@@ -704,9 +721,17 @@ class OCTFileReader:
                         
                         # Convert to uint8 for better display if needed
                         if slice_data.dtype != np.uint8:
-                            # Normalize to 0-255 range
-                            normalized_data = ((slice_data - slice_data.min()) / 
-                                              (slice_data.max() - slice_data.min() + 1e-10) * 255).astype(np.uint8)
+                            # Handle NaN values by replacing with 0 (black)
+                            if np.issubdtype(slice_data.dtype, np.floating):
+                                slice_data = np.nan_to_num(slice_data, nan=0.0, posinf=0.0, neginf=0.0)
+                            
+                            # Normalize to 0-255 range, keeping empty areas black
+                            data_min = slice_data.min()
+                            data_max = slice_data.max()
+                            if data_max > data_min:
+                                normalized_data = ((slice_data - data_min) / (data_max - data_min) * 255).astype(np.uint8)
+                            else:
+                                normalized_data = np.zeros_like(slice_data, dtype=np.uint8)
                             logger.debug(f"Converted slice data from {slice_data.dtype} to uint8")
                             return normalized_data
                         return slice_data
@@ -781,9 +806,17 @@ class OCTFileReader:
                         
                         # Convert to uint8 for better display if needed
                         if slice_data.dtype != np.uint8:
-                            # Normalize to 0-255 range
-                            normalized_data = ((slice_data - slice_data.min()) / 
-                                              (slice_data.max() - slice_data.min() + 1e-10) * 255).astype(np.uint8)
+                            # Handle NaN values by replacing with 0 (black)
+                            if np.issubdtype(slice_data.dtype, np.floating):
+                                slice_data = np.nan_to_num(slice_data, nan=0.0, posinf=0.0, neginf=0.0)
+                            
+                            # Normalize to 0-255 range, keeping empty areas black
+                            data_min = slice_data.min()
+                            data_max = slice_data.max()
+                            if data_max > data_min:
+                                normalized_data = ((slice_data - data_min) / (data_max - data_min) * 255).astype(np.uint8)
+                            else:
+                                normalized_data = np.zeros_like(slice_data, dtype=np.uint8)
                             logger.debug(f"Converted slice data from {slice_data.dtype} to uint8")
                             return normalized_data
                         return slice_data
@@ -805,21 +838,41 @@ class OCTFileReader:
             logger.error(f"Error getting frame image from {file_name}, frame {frame_id}: {str(e)}", exc_info=True)
             return None
     
-    def export_to_dicom(self, file_name: str, output_dir: str) -> Tuple[bool, str]:
+    def export_to_dicom(self, file_name: str, output_dir: str, 
+                        dicom_options: Optional[Dict[str, Any]] = None) -> Tuple[bool, str, List[str]]:
         """
-        Export the OCT file to DICOM format.
+        Export the OCT file to DICOM format with proper headers.
+        
+        Supports: .e2e, .img, .oct, .OCT, .fda, .fds files
         
         Args:
             file_name: Name of the loaded file
             output_dir: Directory to save the DICOM files
+            dicom_options: Optional dictionary with DICOM export options:
+                - rows: For .img files, manually set rows (default 1024)
+                - cols: For .img files, manually set cols (default 512)
+                - interlaced: For .img files, set interlaced (default False)
+                - diskbuffered: For Bioptigen .OCT, reduce memory usage (default False)
+                - extract_scan_repeats: For .e2e, extract all scan repeats (default False)
+                - scalex: For .e2e, manually set x scale in mm (default 0.01)
+                - slice_thickness: For .e2e, manually set z scale in mm (default 0.05)
             
         Returns:
-            Tuple[bool, str]: (Success, Message)
+            Tuple[bool, str, List[str]]: (Success, Message, List of created file paths)
         """
-        if file_name not in self.loaded_files:
+        created_files = []
+        
+        # Look up file path from file name
+        if file_name not in self.file_paths:
             error_msg = f"File not loaded: {file_name}"
             logger.error(error_msg)
-            return False, error_msg
+            return False, error_msg, created_files
+        
+        file_path = self.file_paths[file_name]
+        if file_path not in self.loaded_files:
+            error_msg = f"File object not found for: {file_name}"
+            logger.error(error_msg)
+            return False, error_msg, created_files
         
         # Verify output directory exists
         try:
@@ -829,39 +882,300 @@ class OCTFileReader:
             elif not os.path.isdir(output_dir):
                 error_msg = f"Output path is not a directory: {output_dir}"
                 logger.error(error_msg)
-                return False, error_msg
+                return False, error_msg, created_files
             elif not os.access(output_dir, os.W_OK):
                 error_msg = f"Output directory is not writable: {output_dir}"
                 logger.error(error_msg)
-                return False, error_msg
+                return False, error_msg, created_files
         except Exception as e:
             error_msg = f"Error validating output directory: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            return False, error_msg
+            return False, error_msg, created_files
         
         try:
-            file_obj = self.loaded_files[file_name]
-            file_path = file_obj.filepath
+            file_obj = self.loaded_files[file_path]
             
-            if not os.path.exists(file_path):
-                error_msg = f"OCT file no longer exists at path: {file_path}"
-                logger.error(error_msg)
-                return False, error_msg
-                
-            # Create DICOM from OCT file
-            logger.info(f"Starting DICOM export for {file_name} to {output_dir}")
-            create_dicom_from_oct(file_path, output_dir=output_dir)
-            
-            # Verify that files were created
-            created_files = [f for f in os.listdir(output_dir) if f.lower().endswith('.dcm')]
-            if not created_files:
-                logger.warning(f"DICOM export completed but no .dcm files found in {output_dir}")
+            # Get the original file path
+            if hasattr(file_obj, 'filepath'):
+                original_path = str(file_obj.filepath)
             else:
+                original_path = file_path
+            
+            if not os.path.exists(original_path):
+                error_msg = f"OCT file no longer exists at path: {original_path}"
+                logger.error(error_msg)
+                return False, error_msg, created_files
+            
+            # Get file type
+            file_type = self.get_file_type(original_path)
+            
+            # Check if DICOM export is supported for this file type
+            supported_types = ['e2e', 'img', 'fds', 'fda', 'oct', 'octraw']
+            if file_type not in supported_types:
+                error_msg = f"DICOM export not supported for file type: {file_type}"
+                logger.error(error_msg)
+                return False, error_msg, created_files
+            
+            # Set default options
+            options = dicom_options or {}
+            
+            # Create DICOM from OCT file using oct-converter
+            logger.info(f"Starting DICOM export for {file_name} ({file_type}) to {output_dir}")
+            
+            # Build kwargs based on file type
+            # Note: oct-converter create_dicom_from_oct signature:
+            # (input_file, output_dir=None, rows=1024, cols=512, interlaced=False, 
+            #  diskbuffered=False, extract_scan_repeats=False)
+            kwargs = {'output_dir': output_dir}
+            
+            if file_type == 'img':
+                kwargs['rows'] = options.get('rows', 1024)
+                kwargs['cols'] = options.get('cols', 512)
+                kwargs['interlaced'] = options.get('interlaced', False)
+            elif file_type == 'e2e':
+                kwargs['extract_scan_repeats'] = options.get('extract_scan_repeats', False)
+            elif file_type in ['oct', 'octraw']:
+                kwargs['diskbuffered'] = options.get('diskbuffered', False)
+            
+            # Call the oct-converter DICOM export function
+            result_files = create_dicom_from_oct(original_path, **kwargs)
+            
+            # Convert Path objects to strings
+            created_files = [str(f) for f in result_files] if result_files else []
+            
+            if not created_files:
+                logger.warning(f"DICOM export completed but no files were returned")
+                # Try to find files in output directory
+                created_files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) 
+                                if f.lower().endswith('.dcm')]
+            
+            if created_files:
                 logger.info(f"Successfully exported {len(created_files)} DICOM files to {output_dir}")
-                
-            return True, f"Successfully exported {file_name} to DICOM format ({len(created_files)} files)"
+                return True, f"Successfully exported {file_name} to DICOM format ({len(created_files)} files)", created_files
+            else:
+                return True, f"DICOM export completed for {file_name}", created_files
         
+        except TypeError as e:
+            error_msg = f"DICOM export not supported for this file type: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return False, error_msg, created_files
         except Exception as e:
             error_msg = f"Error exporting to DICOM: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return False, error_msg, created_files
+    
+    def get_dicom_supported_files(self) -> List[str]:
+        """
+        Get list of loaded files that support DICOM export.
+        
+        Returns:
+            List[str]: List of file names that can be exported to DICOM
+        """
+        supported_types = ['e2e', 'img', 'fds', 'fda', 'oct', 'octraw']
+        dicom_files = []
+        
+        for file_name, file_path in self.file_paths.items():
+            try:
+                file_type = self.get_file_type(file_path)
+                if file_type in supported_types:
+                    dicom_files.append(file_name)
+            except Exception:
+                continue
+        
+        return dicom_files
+    
+    def has_segmentation(self, file_name: str, volume_id: int = 0) -> bool:
+        """
+        Check if layer segmentation data is available for a file/volume.
+        
+        Args:
+            file_name: Name of the loaded file
+            volume_id: Volume index (default 0)
+            
+        Returns:
+            bool: True if segmentation data is available
+        """
+        seg_key = f"{file_name}_vol{volume_id}"
+        return seg_key in self.segmentation_data
+    
+    def get_segmentation_data(self, file_name: str, volume_id: int = 0) -> Optional[Dict[str, Any]]:
+        """
+        Get layer segmentation data for a file/volume.
+        
+        Args:
+            file_name: Name of the loaded file
+            volume_id: Volume index (default 0)
+            
+        Returns:
+            Optional[Dict[str, Any]]: Segmentation data dictionary or None
+        """
+        seg_key = f"{file_name}_vol{volume_id}"
+        return self.segmentation_data.get(seg_key)
+    
+    def get_frame_image_with_segmentation(self, file_name: str, frame_id: str) -> Optional[np.ndarray]:
+        """
+        Get the image data for a specific frame with layer segmentation overlay.
+        
+        Args:
+            file_name: Name of the loaded file
+            frame_id: ID of the frame (e.g., 'vol0_slice5')
+            
+        Returns:
+            Optional[np.ndarray]: Image data with segmentation overlay as numpy array, or None if error
+        """
+        # Get base image
+        image_data = self.get_frame_image(file_name, frame_id)
+        if image_data is None:
+            return None
+        
+        # Parse volume and slice IDs
+        if not frame_id.startswith('vol'):
+            logger.warning(f"Segmentation overlay only available for OCT slices, not {frame_id}")
+            return image_data
+        
+        try:
+            parts = frame_id.split('_')
+            volume_id = int(parts[0][3:])
+            slice_id = int(parts[1][5:])
+        except (ValueError, IndexError) as e:
+            logger.error(f"Invalid frame ID format for segmentation: {frame_id}")
+            return image_data
+        
+        # Get segmentation data
+        seg_data = self.get_segmentation_data(file_name, volume_id)
+        if seg_data is None:
+            logger.debug(f"No segmentation data available for {file_name} volume {volume_id}")
+            return image_data
+        
+        contours = seg_data.get('contours')
+        if contours is None:
+            return image_data
+        
+        try:
+            # Convert grayscale to RGB for colored overlay
+            if len(image_data.shape) == 2:
+                image_rgb = np.stack([image_data, image_data, image_data], axis=-1)
+            else:
+                image_rgb = image_data.copy()
+            
+            # Define colors for different layer boundaries (RGB)
+            layer_colors = [
+                (255, 0, 0),      # Red - ILM
+                (0, 255, 0),      # Green - NFL/GCL
+                (0, 0, 255),      # Blue - IPL/INL
+                (255, 255, 0),    # Yellow - INL/OPL
+                (255, 0, 255),    # Magenta - OPL/ONL
+                (0, 255, 255),    # Cyan - ELM
+                (255, 128, 0),    # Orange - IS/OS
+                (128, 0, 255),    # Purple - OS/RPE
+                (0, 255, 128),    # Teal - RPE/BM
+                (255, 128, 128),  # Light red
+                (128, 255, 128),  # Light green
+                (128, 128, 255),  # Light blue
+            ]
+            
+            # Draw contours on the image
+            # contours is typically a dict with layer names as keys
+            if isinstance(contours, dict):
+                for idx, (layer_name, layer_contour) in enumerate(contours.items()):
+                    if layer_contour is None:
+                        continue
+                    
+                    color = layer_colors[idx % len(layer_colors)]
+                    
+                    # Get the contour for this specific slice
+                    if isinstance(layer_contour, np.ndarray):
+                        if len(layer_contour.shape) == 2:
+                            # Shape is (num_slices, width) or (width,)
+                            if layer_contour.shape[0] > slice_id:
+                                contour_line = layer_contour[slice_id]
+                            else:
+                                continue
+                        elif len(layer_contour.shape) == 1:
+                            contour_line = layer_contour
+                        else:
+                            continue
+                        
+                        # Draw the contour line
+                        for x, y in enumerate(contour_line):
+                            if np.isnan(y) or y < 0 or y >= image_rgb.shape[0]:
+                                continue
+                            y_int = int(y)
+                            if 0 <= x < image_rgb.shape[1] and 0 <= y_int < image_rgb.shape[0]:
+                                image_rgb[y_int, x] = color
+                                # Make line thicker (2 pixels)
+                                if y_int + 1 < image_rgb.shape[0]:
+                                    image_rgb[y_int + 1, x] = color
+            
+            logger.debug(f"Added segmentation overlay to {frame_id}")
+            return image_rgb
+            
+        except Exception as e:
+            logger.error(f"Error adding segmentation overlay: {e}", exc_info=True)
+            return image_data
+    
+    def export_segmentation_json(self, file_name: str, volume_id: int, slice_id: int, 
+                                  output_path: str) -> Tuple[bool, str]:
+        """
+        Export layer segmentation data for a specific slice as JSON.
+        
+        Args:
+            file_name: Name of the loaded file
+            volume_id: Volume index
+            slice_id: Slice index
+            output_path: Path to save the JSON file
+            
+        Returns:
+            Tuple[bool, str]: (Success, Message)
+        """
+        seg_data = self.get_segmentation_data(file_name, volume_id)
+        if seg_data is None:
+            return False, f"No segmentation data available for {file_name} volume {volume_id}"
+        
+        contours = seg_data.get('contours')
+        if contours is None:
+            return False, "No contour data found in segmentation"
+        
+        try:
+            # Extract segmentation for this specific slice
+            slice_segmentation = {
+                'file_name': file_name,
+                'volume_id': volume_id,
+                'slice_id': slice_id,
+                'layers': {}
+            }
+            
+            if isinstance(contours, dict):
+                for layer_name, layer_contour in contours.items():
+                    if layer_contour is None:
+                        continue
+                    
+                    if isinstance(layer_contour, np.ndarray):
+                        if len(layer_contour.shape) == 2 and layer_contour.shape[0] > slice_id:
+                            # Get contour for this slice and convert to list
+                            contour_line = layer_contour[slice_id]
+                            # Replace NaN with null for JSON compatibility
+                            contour_list = [None if np.isnan(v) else float(v) for v in contour_line]
+                            slice_segmentation['layers'][layer_name] = {
+                                'y_coordinates': contour_list,
+                                'x_coordinates': list(range(len(contour_list)))
+                            }
+                        elif len(layer_contour.shape) == 1:
+                            contour_list = [None if np.isnan(v) else float(v) for v in layer_contour]
+                            slice_segmentation['layers'][layer_name] = {
+                                'y_coordinates': contour_list,
+                                'x_coordinates': list(range(len(contour_list)))
+                            }
+            
+            # Write to JSON file
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(slice_segmentation, f, indent=2)
+            
+            logger.info(f"Exported segmentation JSON to {output_path}")
+            return True, f"Successfully exported segmentation to {output_path}"
+            
+        except Exception as e:
+            error_msg = f"Error exporting segmentation JSON: {str(e)}"
             logger.error(error_msg, exc_info=True)
             return False, error_msg

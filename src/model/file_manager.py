@@ -26,7 +26,10 @@ class FileManager:
         self.export_dir = ""
         
         # Create temp directory if it doesn't exist
-        os.makedirs(self.temp_dir, exist_ok=True)
+        try:
+            os.makedirs(self.temp_dir, exist_ok=True)
+        except OSError as e:
+            logger.error(f"Failed to create temp directory {self.temp_dir}: {e}")
     
     def validate_file_path(self, file_path: str) -> Tuple[bool, str]:
         """
@@ -118,9 +121,18 @@ class FileManager:
             
         Returns:
             str: Path to the temporary file
+            
+        Raises:
+            OSError: If temp directory cannot be created
         """
-        temp_file = os.path.join(self.temp_dir, f"{prefix}_{uuid.uuid4().hex}{suffix}")
-        return temp_file
+        try:
+            # Ensure temp directory exists
+            os.makedirs(self.temp_dir, exist_ok=True)
+            temp_file = os.path.join(self.temp_dir, f"{prefix}_{uuid.uuid4().hex}{suffix}")
+            return temp_file
+        except OSError as e:
+            logger.error(f"Failed to create temp file: {e}")
+            raise
     
     def save_image(self, image_data: Any, file_path: str, file_format: str = "PNG", 
                  on_duplicate: str = 'overwrite') -> Tuple[bool, str, str]:
@@ -153,7 +165,7 @@ class FileManager:
             elif isinstance(image_data, Image.Image):
                 image = image_data
             else:
-                return False, "Unsupported image data type"
+                return False, "Unsupported image data type", file_path
             
             # Ensure directory exists
             os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)

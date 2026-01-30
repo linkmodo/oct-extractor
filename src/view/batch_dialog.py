@@ -14,6 +14,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
 import os
 import logging
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -81,13 +82,23 @@ class BatchProcessWorker(QThread):
                     success, message = self.file_controller.import_file(file_path)
                     
                     if success:
-                        # Get frames
-                        frames = self.file_controller.frame_controller.get_available_frames(file_name)
+                        # Get frames using the oct_reader directly
+                        try:
+                            frames = self.file_controller.oct_reader.get_frames(file_name)
+                        except Exception as frame_err:
+                            logger.error(f"Error getting frames from {file_name}: {frame_err}")
+                            frames = []
                         
                         if frames:
                             # Create file-specific export directory
-                            file_export_dir = os.path.join(self.export_dir, os.path.splitext(file_name)[0])
-                            os.makedirs(file_export_dir, exist_ok=True)
+                            try:
+                                file_export_dir = os.path.join(self.export_dir, os.path.splitext(file_name)[0])
+                                os.makedirs(file_export_dir, exist_ok=True)
+                            except OSError as dir_err:
+                                error_count += 1
+                                error_messages.append(f"Cannot create export directory for {file_name}: {dir_err}")
+                                logger.error(f"Cannot create export directory for {file_name}: {dir_err}")
+                                continue
                             
                             # Export frames with progress tracking
                             def file_progress_callback(progress):
@@ -210,7 +221,8 @@ class BatchDialog(QDialog):
         format_layout = QHBoxLayout()
         format_label = QLabel("Format:")
         self.format_combo = QComboBox()
-        self.format_combo.addItems(["PNG", "JPEG", "TIFF"])
+        self.format_combo.addItems(["PNG", "JPEG", "TIFF", "DICOM"])
+        self.format_combo.currentTextChanged.connect(self.on_format_changed)
         format_layout.addWidget(format_label)
         format_layout.addWidget(self.format_combo)
         export_settings_layout.addLayout(format_layout)
@@ -231,6 +243,15 @@ class BatchDialog(QDialog):
         self.export_metadata_checkbox = QCheckBox("Export metadata (JSON)")
         self.export_metadata_checkbox.setChecked(True)
         export_settings_layout.addWidget(self.export_metadata_checkbox)
+        
+        # Layer segmentation options
+        self.seg_overlay_checkbox = QCheckBox("Export with segmentation overlay (if available)")
+        self.seg_overlay_checkbox.setToolTip("Draw layer boundaries on OCT images when segmentation data is available")
+        export_settings_layout.addWidget(self.seg_overlay_checkbox)
+        
+        self.seg_json_checkbox = QCheckBox("Export segmentation as JSON (if available)")
+        self.seg_json_checkbox.setToolTip("Export layer segmentation coordinates as JSON for analysis")
+        export_settings_layout.addWidget(self.seg_json_checkbox)
         
         # Create subfolder for each file
         self.create_subfolder_checkbox = QCheckBox("Create subfolder for each file")
@@ -344,6 +365,17 @@ class BatchDialog(QDialog):
             self.export_path.text() != "Not selected"
         )
     
+    def on_format_changed(self, format_text):
+        """Handle format combo box change."""
+        is_dicom = format_text == "DICOM"
+        # Disable image-specific options when DICOM is selected
+        self.seg_overlay_checkbox.setEnabled(not is_dicom)
+        self.seg_json_checkbox.setEnabled(not is_dicom)
+        
+        if is_dicom:
+            self.seg_overlay_checkbox.setChecked(False)
+            self.seg_json_checkbox.setChecked(False)
+    
     def start_processing(self):
         """Start the batch processing."""
         if not self.selected_files:
@@ -354,6 +386,21 @@ class BatchDialog(QDialog):
             QMessageBox.warning(self, "Error", "No export directory selected")
             return
         
+        # Validate export directory exists and is writable
+        export_dir = self.export_path.text()
+        try:
+            if not os.path.exists(export_dir):
+                os.makedirs(export_dir, exist_ok=True)
+            elif not os.path.isdir(export_dir):
+                QMessageBox.warning(self, "Error", f"Export path is not a directory: {export_dir}")
+                return
+            elif not os.access(export_dir, os.W_OK):
+                QMessageBox.warning(self, "Error", f"Export directory is not writable: {export_dir}")
+                return
+        except OSError as e:
+            QMessageBox.warning(self, "Error", f"Cannot access export directory: {e}")
+            return
+        
         # Create export settings
         export_settings = {
             'format': self.format_combo.currentText(),
@@ -361,29 +408,36 @@ class BatchDialog(QDialog):
             'crop': False,     # No cropping in batch mode
             'crop_params': {},
             'export_metadata': self.export_metadata_checkbox.isChecked(),
-            'on_duplicate': self.duplicate_combo.currentData()  # Add duplicate handling option
+            'on_duplicate': self.duplicate_combo.currentData(),  # Add duplicate handling option
+            'segmentation_overlay': self.seg_overlay_checkbox.isChecked(),
+            'segmentation_json': self.seg_json_checkbox.isChecked()
         }
         
         # Disable UI during processing
         self.setUIEnabled(False)
         
-        # Create and start worker thread
-        self.worker = BatchProcessWorker(
-            self.file_controller,
-            self.export_controller,
-            self.selected_files,
-            self.export_path.text(),
-            export_settings
-        )
-        
-        # Connect worker signals
-        self.worker.progress_updated.connect(self.update_progress)
-        self.worker.file_progress_updated.connect(self.update_file_progress)
-        self.worker.processing_file.connect(self.update_current_file)
-        self.worker.processing_complete.connect(self.processing_complete)
-        
-        # Start worker
-        self.worker.start()
+        try:
+            # Create and start worker thread
+            self.worker = BatchProcessWorker(
+                self.file_controller,
+                self.export_controller,
+                self.selected_files,
+                export_dir,
+                export_settings
+            )
+            
+            # Connect worker signals
+            self.worker.progress_updated.connect(self.update_progress)
+            self.worker.file_progress_updated.connect(self.update_file_progress)
+            self.worker.processing_file.connect(self.update_current_file)
+            self.worker.processing_complete.connect(self.processing_complete)
+            
+            # Start worker
+            self.worker.start()
+        except Exception as e:
+            logger.exception(f"Failed to start batch processing: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to start batch processing: {e}")
+            self.setUIEnabled(True)
     
     def update_progress(self, current, total):
         """Update the overall progress bar."""

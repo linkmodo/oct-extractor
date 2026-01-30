@@ -190,17 +190,19 @@ class SettingsDialog(QDialog):
         # Load settings
         if os.path.exists(settings_file):
             try:
-                with open(settings_file, 'r') as f:
+                with open(settings_file, 'r', encoding='utf-8') as f:
                     self.settings = json.load(f)
-            except:
+            except (json.JSONDecodeError, IOError, OSError) as e:
+                print(f"Warning: Could not load settings file: {e}")
                 self.settings = {}
         
         # Load presets
         if os.path.exists(presets_file):
             try:
-                with open(presets_file, 'r') as f:
+                with open(presets_file, 'r', encoding='utf-8') as f:
                     self.presets = json.load(f)
-            except:
+            except (json.JSONDecodeError, IOError, OSError) as e:
+                print(f"Warning: Could not load presets file: {e}")
                 self.presets = {}
     
     def save_settings(self):

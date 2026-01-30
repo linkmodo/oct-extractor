@@ -8,7 +8,10 @@ Controls frame selection operations for the OCT Image Extraction application.
 """
 
 import os
+import logging
 from typing import Tuple, List, Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 class FrameController:
     """Controller class for frame operations."""
@@ -33,13 +36,21 @@ class FrameController:
         Returns:
             List[Dict[str, Any]]: List of frame information dictionaries
         """
-        frames = self.oct_reader.get_frames(file_name)
-        
-        # Add file name to each frame for reference
-        for frame in frames:
-            frame['file_name'] = file_name
-        
-        return frames
+        if not file_name:
+            logger.warning("Empty file name provided to get_available_frames")
+            return []
+            
+        try:
+            frames = self.oct_reader.get_frames(file_name)
+            
+            # Add file name to each frame for reference
+            for frame in frames:
+                frame['file_name'] = file_name
+            
+            return frames
+        except Exception as e:
+            logger.error(f"Error getting frames for {file_name}: {e}")
+            return []
     
     def select_frame(self, file_name: str, frame_id: str) -> bool:
         """
@@ -221,4 +232,12 @@ class FrameController:
         Returns:
             Optional[Any]: Image data, or None if error
         """
-        return self.oct_reader.get_frame_image(file_name, frame_id)
+        if not file_name or not frame_id:
+            logger.warning(f"Invalid parameters: file_name={file_name}, frame_id={frame_id}")
+            return None
+            
+        try:
+            return self.oct_reader.get_frame_image(file_name, frame_id)
+        except Exception as e:
+            logger.error(f"Error getting frame image for {file_name}/{frame_id}: {e}")
+            return None

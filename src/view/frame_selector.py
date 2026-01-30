@@ -7,6 +7,7 @@ Frame Selector Widget
 Widget for selecting frames from OCT files.
 """
 
+import logging
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                            QScrollArea, QGridLayout, QCheckBox, QPushButton)
 from PyQt5.QtCore import Qt, pyqtSignal
@@ -15,6 +16,8 @@ import os
 import numpy as np
 from PIL import Image
 import io
+
+logger = logging.getLogger(__name__)
 
 class FrameSelector(QWidget):
     """Widget for selecting frames from OCT files."""
@@ -88,15 +91,21 @@ class FrameSelector(QWidget):
         Args:
             frames: List of frame information dictionaries
         """
+        if frames is None:
+            frames = []
+            
         self.frames = frames
         self.selected_frames = []
         self.frame_widgets = {}
         
         # Clear existing frames from layout
-        while self.frame_layout.count():
-            item = self.frame_layout.takeAt(0)
-            if item.widget():
-                item.widget().setParent(None)
+        try:
+            while self.frame_layout.count():
+                item = self.frame_layout.takeAt(0)
+                if item.widget():
+                    item.widget().setParent(None)
+        except Exception as e:
+            logger.error(f"Error clearing frame layout: {e}")
         
         # Create a multi-column flow layout using a grid
         flow_widget = QWidget()
@@ -268,30 +277,39 @@ class FrameSelector(QWidget):
             frame_id: ID of the frame
             image_data: Image data as numpy array
         """
-        if frame_id not in self.frame_widgets:
+        if not frame_id or frame_id not in self.frame_widgets:
+            logger.warning(f"Cannot set preview for frame: {frame_id}")
             return
         
-        widgets = self.frame_widgets[frame_id]
+        if image_data is None:
+            logger.warning(f"No image data provided for frame: {frame_id}")
+            return
         
-        # Convert image data to QPixmap
-        if isinstance(image_data, np.ndarray):
-            # Convert numpy array to PIL Image
-            image = Image.fromarray(image_data)
+        try:
+            widgets = self.frame_widgets[frame_id]
             
-            # Convert PIL Image to QPixmap
-            img_buffer = io.BytesIO()
-            image.save(img_buffer, format='PNG')
-            img_buffer.seek(0)
-            
-            pixmap = QPixmap()
-            pixmap.loadFromData(img_buffer.getvalue())
-            
-            # Create or update image label
-            if 'image' not in widgets:
-                image_label = QLabel()
-                image_label.setFixedSize(100, 100)
-                image_label.setScaledContents(True)
-                widgets['layout'].insertWidget(1, image_label)
-                widgets['image'] = image_label
-            
-            widgets['image'].setPixmap(pixmap)
+            # Convert image data to QPixmap
+            if isinstance(image_data, np.ndarray):
+                # Convert numpy array to PIL Image
+                image = Image.fromarray(image_data)
+                
+                # Convert PIL Image to QPixmap
+                img_buffer = io.BytesIO()
+                image.save(img_buffer, format='PNG')
+                img_buffer.seek(0)
+                
+                pixmap = QPixmap()
+                pixmap.loadFromData(img_buffer.getvalue())
+                
+                # Create or update image label
+                if 'image' not in widgets:
+                    image_label = QLabel()
+                    image_label.setFixedSize(100, 100)
+                    image_label.setScaledContents(True)
+                    if 'layout' in widgets:
+                        widgets['layout'].insertWidget(1, image_label)
+                    widgets['image'] = image_label
+                
+                widgets['image'].setPixmap(pixmap)
+        except Exception as e:
+            logger.error(f"Error setting frame preview for {frame_id}: {e}")
